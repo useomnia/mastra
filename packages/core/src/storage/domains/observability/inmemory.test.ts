@@ -31,7 +31,7 @@ describe('ObservabilityInMemory', () => {
     traceId: 'trace-1',
     spanId: 'span-1',
     parentSpanId: null,
-    span: 'Test Span',
+    name: 'Test Span',
     spanType: SpanType.AGENT_RUN,
     entityType: EntityType.AGENT,
     entityId: 'agent-1',

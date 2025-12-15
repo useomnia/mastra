@@ -369,6 +369,13 @@ export class ObservabilityInMemory extends ObservabilityStorage {
     if (typeof a !== typeof b) {
       return false;
     }
+    // Handle Date objects
+    if (a instanceof Date && b instanceof Date) {
+      return a.getTime() === b.getTime();
+    }
+    if (a instanceof Date || b instanceof Date) {
+      return false; // One is Date, other is not
+    }
     if (typeof a === 'object') {
       if (Array.isArray(a) && Array.isArray(b)) {
         if (a.length !== b.length) return false;

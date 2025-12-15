@@ -325,10 +325,9 @@ export class ObservabilityPG extends ObservabilityStorage {
 
       const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-      // Order by clause
       const sortField = orderBy?.field === 'endedAt' ? 'endedAtZ' : 'startedAtZ';
       const sortDirection = orderBy?.direction === 'ASC' ? 'ASC' : 'DESC';
-      const orderClause = `ORDER BY r."${sortField}" ${sortDirection} NULLS LAST`;
+      const orderClause = `ORDER BY r."${sortField}" ${sortDirection}`;
 
       // Get total count
       const countResult = await this.client.oneOrNone<{ count: string }>(

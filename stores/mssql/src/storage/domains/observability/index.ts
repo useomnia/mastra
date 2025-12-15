@@ -293,6 +293,15 @@ export class ObservabilityMSSQL extends ObservabilityStorage {
         // Scope filter (MSSQL uses JSON_VALUE for extraction)
         if (filters.scope !== undefined) {
           for (const [key, value] of Object.entries(filters.scope)) {
+            // Validate key to prevent SQL injection in JSON path
+            if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
+              throw new MastraError({
+                id: createStorageErrorId('MSSQL', 'LIST_TRACES', 'INVALID_FILTER_KEY'),
+                domain: ErrorDomain.STORAGE,
+                category: ErrorCategory.USER,
+                details: { key },
+              });
+            }
             const param = `p${paramIndex++}`;
             conditions.push(`JSON_VALUE(r.[scope], '$.${key}') = @${param}`);
             params[param] = typeof value === 'string' ? value : JSON.stringify(value);
@@ -302,6 +311,15 @@ export class ObservabilityMSSQL extends ObservabilityStorage {
         // Metadata filter (JSON_VALUE)
         if (filters.metadata !== undefined) {
           for (const [key, value] of Object.entries(filters.metadata)) {
+            // Validate key to prevent SQL injection in JSON path
+            if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
+              throw new MastraError({
+                id: createStorageErrorId('MSSQL', 'LIST_TRACES', 'INVALID_FILTER_KEY'),
+                domain: ErrorDomain.STORAGE,
+                category: ErrorCategory.USER,
+                details: { key },
+              });
+            }
             const param = `p${paramIndex++}`;
             conditions.push(`JSON_VALUE(r.[metadata], '$.${key}') = @${param}`);
             params[param] = typeof value === 'string' ? value : JSON.stringify(value);
@@ -350,7 +368,6 @@ export class ObservabilityMSSQL extends ObservabilityStorage {
 
       const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-      // Order by clause
       const sortField = orderBy?.field === 'endedAt' ? 'endedAt' : 'startedAt';
       const sortDirection = orderBy?.direction === 'ASC' ? 'ASC' : 'DESC';
 

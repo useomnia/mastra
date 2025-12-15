@@ -172,7 +172,7 @@ export function pgTests() {
             await t.none(`DROP SCHEMA IF EXISTS ${testSchema} CASCADE`);
 
             // Create schema restricted user with minimal permissions
-            await t.none(`          
+            await t.none(`
                 DO $$
                 BEGIN
                   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${schemaRestrictedUser}') THEN
@@ -229,8 +229,8 @@ export function pgTests() {
 
             // Ensure no active connections from restricted user
             await tempDb.none(`
-                  SELECT pg_terminate_backend(pid) 
-                  FROM pg_stat_activity 
+                  SELECT pg_terminate_backend(pid)
+                  FROM pg_stat_activity
                   WHERE usename = '${schemaRestrictedUser}'
                 `);
           } finally {
@@ -249,10 +249,10 @@ export function pgTests() {
                   DO $$
                   BEGIN
                     -- Terminate connections
-                    PERFORM pg_terminate_backend(pid) 
-                    FROM pg_stat_activity 
+                    PERFORM pg_terminate_backend(pid)
+                    FROM pg_stat_activity
                     WHERE usename = '${schemaRestrictedUser}';
-      
+
                     -- Drop schema
                     DROP SCHEMA IF EXISTS ${testSchema} CASCADE;
                   END $$;
@@ -771,7 +771,7 @@ export function pgTests() {
     });
 
     describe('Spans Table Migration', () => {
-      const testSchema = 'migration_test_schema';
+      const testSchema = `migration_test_schema_${Date.now()}_${Math.random().toString(16).slice(2)}`;
       let migrationStore: PostgresStore;
 
       beforeAll(async () => {

@@ -254,14 +254,14 @@ export class ObservabilityMongoDB extends ObservabilityStorage {
         if (filters.status !== undefined) {
           switch (filters.status) {
             case TraceStatus.ERROR:
-              mongoFilter.error = { $ne: null };
+              mongoFilter.error = { $exists: true, $ne: null };
               break;
             case TraceStatus.RUNNING:
               mongoFilter.endedAt = null;
               mongoFilter.error = null;
               break;
             case TraceStatus.SUCCESS:
-              mongoFilter.endedAt = { $ne: null };
+              mongoFilter.endedAt = { $exists: true, $ne: null };
               mongoFilter.error = null;
               break;
           }
@@ -300,16 +300,40 @@ export class ObservabilityMongoDB extends ObservabilityStorage {
       }
 
       // Build sort
+      // Standardized NULL ordering: NULLs first in ASC, NULLs last in DESC
+      // MongoDB's natural behavior: NULLs first for both ASC and DESC
+      // For DESC, we use aggregation to push NULLs last
       const sortField = orderBy?.field === 'endedAt' ? 'endedAt' : 'startedAt';
       const sortDirection = orderBy?.direction === 'ASC' ? 1 : -1;
 
       // Get paginated spans
-      const spans = await collection
-        .find(mongoFilter)
-        .sort({ [sortField]: sortDirection })
-        .skip(page * perPage)
-        .limit(perPage)
-        .toArray();
+      let spans;
+      if (sortDirection === -1) {
+        // For DESC, use aggregation to put NULLs last
+        // Add a computed field that is 1 for NULL, 0 otherwise, then sort by that first
+        spans = await collection
+          .aggregate([
+            { $match: mongoFilter },
+            {
+              $addFields: {
+                _nullSort: { $cond: [{ $eq: [`$${sortField}`, null] }, 1, 0] },
+              },
+            },
+            { $sort: { _nullSort: 1, [sortField]: -1 } },
+            { $skip: page * perPage },
+            { $limit: perPage },
+            { $project: { _nullSort: 0 } },
+          ])
+          .toArray();
+      } else {
+        // For ASC, natural MongoDB behavior (NULLs first) is correct
+        spans = await collection
+          .find(mongoFilter)
+          .sort({ [sortField]: 1 })
+          .skip(page * perPage)
+          .limit(perPage)
+          .toArray();
+      }
 
       return {
         pagination: {

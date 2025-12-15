@@ -1,8 +1,8 @@
-import type z from 'zod';
+import type { z } from 'zod';
 import { MastraBase } from '../../../base';
 import { ErrorCategory, ErrorDomain, MastraError } from '../../../error';
-import type { dbTimestamps } from '../shared';
-import type { listTracesResponseSchema, listTracesSchema, spanIds, spanRecordSchema, traceRecordSchema } from './types';
+import { dbTimestamps } from '../shared';
+import { listTracesResponseSchema, listTracesSchema, spanIds, spanRecordSchema, traceRecordSchema } from './types';
 
 export type SpanRecord = z.infer<typeof spanRecordSchema>;
 export type CreateSpanRecord = Omit<SpanRecord, keyof typeof dbTimestamps>;

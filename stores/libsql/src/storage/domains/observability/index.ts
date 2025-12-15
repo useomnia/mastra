@@ -236,6 +236,15 @@ export class ObservabilityLibSQL extends ObservabilityStorage {
         if (filters.scope !== undefined) {
           // For SQLite/libsql, we need to check each key in the scope object
           for (const [key, value] of Object.entries(filters.scope)) {
+            // Validate key to prevent SQL injection in JSON path
+            if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
+              throw new MastraError({
+                id: createStorageErrorId('LIBSQL', 'LIST_TRACES', 'INVALID_FILTER_KEY'),
+                domain: ErrorDomain.STORAGE,
+                category: ErrorCategory.USER,
+                details: { key },
+              });
+            }
             conditions.push(`json_extract(scope, '$.${key}') = ?`);
             args.push(typeof value === 'string' ? value : JSON.stringify(value));
           }
@@ -244,6 +253,15 @@ export class ObservabilityLibSQL extends ObservabilityStorage {
         // Metadata filter (JSON containment)
         if (filters.metadata !== undefined) {
           for (const [key, value] of Object.entries(filters.metadata)) {
+            // Validate key to prevent SQL injection in JSON path
+            if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
+              throw new MastraError({
+                id: createStorageErrorId('LIBSQL', 'LIST_TRACES', 'INVALID_FILTER_KEY'),
+                domain: ErrorDomain.STORAGE,
+                category: ErrorCategory.USER,
+                details: { key },
+              });
+            }
             conditions.push(`json_extract(metadata, '$.${key}') = ?`);
             args.push(typeof value === 'string' ? value : JSON.stringify(value));
           }
@@ -292,11 +310,11 @@ export class ObservabilityLibSQL extends ObservabilityStorage {
       const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
       // Order by clause
-      // SQLite doesn't support NULLS LAST, so we use COALESCE or CASE for similar behavior
+      // Standardized NULL ordering: NULLs first in ASC, NULLs last in DESC
+      // SQLite's natural behavior: NULLs first for both ASC and DESC
+      // So we need CASE WHEN workaround only for DESC to push NULLs last
       const sortField = orderBy?.field === 'endedAt' ? 'endedAt' : 'startedAt';
       const sortDirection = orderBy?.direction === 'ASC' ? 'ASC' : 'DESC';
-      // For DESC, we want NULLs last (they normally come first in DESC)
-      // For ASC, NULLs come first by default which matches NULLS FIRST behavior
       const orderByClause =
         sortDirection === 'DESC'
           ? `CASE WHEN ${sortField} IS NULL THEN 1 ELSE 0 END, ${sortField} DESC`

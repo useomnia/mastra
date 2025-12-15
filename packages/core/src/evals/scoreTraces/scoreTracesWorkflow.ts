@@ -143,7 +143,7 @@ export async function runScorerOnTarget({
     },
     traceId: target.traceId,
     spanId: target.spanId,
-    entityId: span.entityId,
+    entityId: span.entityId || span.entityName || 'unknown',
     entityType: span.spanType,
     entity: { traceId: span.traceId, spanId: span.spanId },
     source: 'TEST',

@@ -1069,8 +1069,8 @@ export class ProcessorRunner {
         type: SpanType.PROCESSOR_RUN,
         name: `output step processor: ${processor.id}`,
         entityType: EntityType.OUTPUT_PROCESSOR,
-        entityId: processorOrWorkflow.id,
-        entityName: processorOrWorkflow.name,
+        entityId: processor.id,
+        entityName: processor.name,
         attributes: {
           processorType: 'output',
           processorIndex: index,
