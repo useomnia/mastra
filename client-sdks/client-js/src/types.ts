@@ -425,7 +425,7 @@ export interface McpServerToolListResponse {
 export type ClientScoreRowData = Omit<ScoreRowData, 'createdAt' | 'updatedAt'> & {
   createdAt: string;
   updatedAt: string;
-} & { spanId?: string };
+};
 
 /**
  * Response for listing scores (client version with serialized dates)

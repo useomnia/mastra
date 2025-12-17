@@ -70,6 +70,16 @@ function resolveTracingStorageStrategy(
   return storage.tracingStrategy.preferred;
 }
 
+// Helper to safely extract string from metadata
+function getStringOrNull (value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+};
+
+// Helper to safely extract object from metadata
+function getObjectOrNull (value: unknown): Record<string, any> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : null;
+};
+
 export class DefaultExporter extends BaseExporter {
   name = 'mastra-default-observability-exporter';
 
@@ -359,6 +369,9 @@ export class DefaultExporter extends BaseExporter {
     }
   }
 
+
+
+
   private buildCreateRecord(span: AnyExportedSpan): CreateSpanRecord {
     const metadata = span.metadata ?? {};
 
@@ -374,21 +387,21 @@ export class DefaultExporter extends BaseExporter {
       entityName: span.entityName ?? null,
 
       // Identity & Tenancy - extracted from metadata if present
-      userId: (metadata.userId as string) ?? null,
-      organizationId: (metadata.organizationId as string) ?? null,
-      resourceId: (metadata.resourceId as string) ?? null,
+      userId: getStringOrNull(metadata.userId),
+      organizationId: getStringOrNull(metadata.organizationId),
+      resourceId: getStringOrNull(metadata.resourceId),
 
       // Correlation IDs - extracted from metadata if present
-      runId: (metadata.runId as string) ?? null,
-      sessionId: (metadata.sessionId as string) ?? null,
-      threadId: (metadata.threadId as string) ?? null,
-      requestId: (metadata.requestId as string) ?? null,
+      runId: getStringOrNull(metadata.runId),
+      sessionId: getStringOrNull(metadata.sessionId),
+      threadId: getStringOrNull(metadata.threadId),
+      requestId: getStringOrNull(metadata.requestId),
 
       // Deployment context - extracted from metadata if present
-      environment: (metadata.environment as string) ?? null,
-      source: (metadata.source as string) ?? null,
-      serviceName: (metadata.serviceName as string) ?? null,
-      scope: (metadata.scope as Record<string, any>) ?? null,
+      environment: getStringOrNull(metadata.environment),
+      source: getStringOrNull(metadata.source),
+      serviceName: getStringOrNull(metadata.serviceName),
+      scope: getObjectOrNull(metadata.scope),
 
       // Span data
       spanType: span.type,

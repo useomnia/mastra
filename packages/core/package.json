@@ -32,7 +32,7 @@
       }
     },
     "./tools/is-vercel-tool": {
-      "import": {
+      "import": {@ai-sdk/provider-v5
         "types": "./dist/tools/is-vercel-tool.d.ts",
         "default": "./dist/tools/is-vercel-tool.js"
       },

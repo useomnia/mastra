@@ -30,16 +30,26 @@ export class StoreOperationsMSSQL extends StoreOperations {
   private setupSchemaPromise: Promise<void> | null = null;
   private schemaSetupComplete: boolean | undefined = undefined;
 
-  protected getSqlType(type: StorageColumn['type'], isPrimaryKey = false, useLargeStorage = false): string {
+  protected getSqlType(
+    type: StorageColumn['type'],
+    isPrimaryKey = false,
+    useLargeStorage = false,
+    useSmallStorage = false,
+  ): string {
     switch (type) {
       case 'text':
         // Use NVARCHAR(MAX) for columns that store large amounts of data (workingMemory, snapshot, metadata)
         if (useLargeStorage) {
           return 'NVARCHAR(MAX)';
         }
-        // Use NVARCHAR(400) for regular columns to enable composite indexing
-        // MSSQL has a 900-byte index key limit
-        // NVARCHAR(400) = 800 bytes, leaving 100 bytes for other columns in composite indexes
+        // Use NVARCHAR(100) for columns that participate in composite indexes
+        // MSSQL has a 900-byte index key limit, NVARCHAR(100) = 200 bytes
+        // This allows up to 4 columns in a composite index (4 * 200 = 800 bytes < 900)
+        if (useSmallStorage) {
+          return 'NVARCHAR(100)';
+        }
+        // Use NVARCHAR(400) for regular columns to enable single-column indexing
+        // MSSQL has a 900-byte index key limit, NVARCHAR(400) = 800 bytes
         // Primary keys use NVARCHAR(255) for consistency with common UUID/ID lengths
         return isPrimaryKey ? 'NVARCHAR(255)' : 'NVARCHAR(400)';
       case 'timestamp':
@@ -237,6 +247,17 @@ export class StoreOperationsMSSQL extends StoreOperations {
         'other', // traces.other - additional trace data
       ];
 
+      // Columns that participate in composite indexes need smaller sizes (NVARCHAR(100))
+      // MSSQL has a 900-byte index key limit, so composite indexes with NVARCHAR(400) columns fail
+      // These are typically ID/type fields that don't need 400 chars
+      const compositeIndexColumns = [
+        'entityType', // Used in: (entityType, entityId), (entityType, entityName)
+        'entityId', // Used in: (entityType, entityId)
+        'entityName', // Used in: (entityType, entityName)
+        'organizationId', // Used in: (organizationId, userId)
+        'userId', // Used in: (organizationId, userId)
+      ];
+
       const columns = Object.entries(schema)
         .map(([name, def]) => {
           const parsedName = parseSqlIdentifier(name, 'column name');
@@ -245,7 +266,8 @@ export class StoreOperationsMSSQL extends StoreOperations {
           if (!def.nullable) constraints.push('NOT NULL');
           const isIndexed = !!def.primaryKey || uniqueConstraintColumns.includes(name);
           const useLargeStorage = largeDataColumns.includes(name);
-          return `[${parsedName}] ${this.getSqlType(def.type, isIndexed, useLargeStorage)} ${constraints.join(' ')}`.trim();
+          const useSmallStorage = compositeIndexColumns.includes(name);
+          return `[${parsedName}] ${this.getSqlType(def.type, isIndexed, useLargeStorage, useSmallStorage)} ${constraints.join(' ')}`.trim();
         })
         .join(',\n');
 
@@ -293,15 +315,18 @@ export class StoreOperationsMSSQL extends StoreOperations {
         await this.pool.request().query(alterSql);
       }
 
+      // Use schema prefix for constraint names to avoid collisions across schemas
+      const schemaPrefix = this.schemaName ? `${this.schemaName}_` : '';
+
       if (tableName === TABLE_WORKFLOW_SNAPSHOT) {
-        const constraintName = 'mastra_workflow_snapshot_workflow_name_run_id_key';
+        const constraintName = `${schemaPrefix}mastra_workflow_snapshot_workflow_name_run_id_key`;
         const checkConstraintSql = `SELECT 1 AS found FROM sys.key_constraints WHERE name = @constraintName`;
         const checkConstraintRequest = this.pool.request();
         checkConstraintRequest.input('constraintName', constraintName);
         const constraintResult = await checkConstraintRequest.query(checkConstraintSql);
         const constraintExists = Array.isArray(constraintResult.recordset) && constraintResult.recordset.length > 0;
         if (!constraintExists) {
-          const addConstraintSql = `ALTER TABLE ${getTableName({ indexName: tableName, schemaName: getSchemaName(this.schemaName) })} ADD CONSTRAINT ${constraintName} UNIQUE ([workflow_name], [run_id])`;
+          const addConstraintSql = `ALTER TABLE ${getTableName({ indexName: tableName, schemaName: getSchemaName(this.schemaName) })} ADD CONSTRAINT [${constraintName}] UNIQUE ([workflow_name], [run_id])`;
           await this.pool.request().query(addConstraintSql);
         }
       }
@@ -311,7 +336,7 @@ export class StoreOperationsMSSQL extends StoreOperations {
         await this.migrateSpansTable();
 
         // Add composite primary key for spans table (traceId, spanId)
-        const pkConstraintName = 'mastra_ai_spans_traceid_spanid_pk';
+        const pkConstraintName = `${schemaPrefix}mastra_ai_spans_traceid_spanid_pk`;
         const checkPkRequest = this.pool.request();
         checkPkRequest.input('constraintName', pkConstraintName);
         const pkResult = await checkPkRequest.query(
@@ -320,7 +345,7 @@ export class StoreOperationsMSSQL extends StoreOperations {
         const pkExists = Array.isArray(pkResult.recordset) && pkResult.recordset.length > 0;
         if (!pkExists) {
           try {
-            const addPkSql = `ALTER TABLE ${getTableName({ indexName: tableName, schemaName: getSchemaName(this.schemaName) })} ADD CONSTRAINT ${pkConstraintName} PRIMARY KEY ([traceId], [spanId])`;
+            const addPkSql = `ALTER TABLE ${getTableName({ indexName: tableName, schemaName: getSchemaName(this.schemaName) })} ADD CONSTRAINT [${pkConstraintName}] PRIMARY KEY ([traceId], [spanId])`;
             await this.pool.request().query(addPkSql);
           } catch (pkError) {
             // Log warning but don't fail - existing tables might have data issues
@@ -370,6 +395,9 @@ export class StoreOperationsMSSQL extends StoreOperations {
         'tags',
       ];
 
+      // Columns that participate in composite indexes need smaller sizes
+      const compositeIndexColumns = ['entityType', 'entityId', 'entityName', 'organizationId', 'userId'];
+
       for (const columnName of newColumns) {
         const columnDef = schema[columnName];
         if (columnDef) {
@@ -378,8 +406,9 @@ export class StoreOperationsMSSQL extends StoreOperations {
             // Apply the same large data column logic as createTable
             const largeDataColumns = ['metadata', 'input', 'output'];
             const useLargeStorage = largeDataColumns.includes(columnName);
+            const useSmallStorage = compositeIndexColumns.includes(columnName);
             const isIndexed = !!columnDef.primaryKey;
-            const sqlType = this.getSqlType(columnDef.type, isIndexed, useLargeStorage);
+            const sqlType = this.getSqlType(columnDef.type, isIndexed, useLargeStorage, useSmallStorage);
             const nullable = columnDef.nullable === false ? 'NOT NULL' : '';
             const defaultValue = columnDef.nullable === false ? this.getDefaultValue(columnDef.type) : '';
             const alterSql =
@@ -436,9 +465,12 @@ export class StoreOperationsMSSQL extends StoreOperations {
               'instructions',
               'other',
             ];
+            // Columns that participate in composite indexes need smaller sizes
+            const compositeIndexColumns = ['entityType', 'entityId', 'entityName', 'organizationId', 'userId'];
             const useLargeStorage = largeDataColumns.includes(columnName);
+            const useSmallStorage = compositeIndexColumns.includes(columnName);
             const isIndexed = !!columnDef.primaryKey;
-            const sqlType = this.getSqlType(columnDef.type, isIndexed, useLargeStorage);
+            const sqlType = this.getSqlType(columnDef.type, isIndexed, useLargeStorage, useSmallStorage);
             const nullable = columnDef.nullable === false ? 'NOT NULL' : '';
             const defaultValue = columnDef.nullable === false ? this.getDefaultValue(columnDef.type) : '';
             const parsedColumnName = parseSqlIdentifier(columnName, 'column name');

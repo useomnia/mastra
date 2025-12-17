@@ -328,8 +328,24 @@ function unwrapSchema(schema: z.ZodTypeAny): { base: z.ZodTypeAny; nullable: boo
 }
 
 function zodToStorageType(schema: z.ZodTypeAny): StorageColumnType {
-  if (schema instanceof z.ZodString || schema instanceof z.ZodNativeEnum) {
+  if (schema instanceof z.ZodString) {
+    // Check for UUID validation
+    const checks: Array<{ kind: string }> = (schema as any)?._def?.checks ?? [];
+    if (checks.some(c => c.kind === 'uuid')) {
+      return 'uuid';
+    }
     return 'text';
+  }
+  if (schema instanceof z.ZodNativeEnum) {
+    return 'text';
+  }
+  if (schema instanceof z.ZodNumber) {
+    // Check for integer validation
+    const checks: Array<{ kind: string }> = (schema as any)?._def?.checks ?? [];
+    return checks.some(c => c.kind === 'int') ? 'integer' : 'float';
+  }
+  if (schema instanceof z.ZodBigInt) {
+    return 'bigint';
   }
   if (schema instanceof z.ZodDate) {
     return 'timestamp';
