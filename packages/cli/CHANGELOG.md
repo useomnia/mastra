@@ -1,5 +1,21 @@
 # mastra
 
+## 1.0.0-beta.11
+
+### Patch Changes
+
+- Set `externals: true` as the default for `mastra build` and cloud-deployer to reduce bundle issues with native dependencies. ([`0dbf199`](https://github.com/mastra-ai/mastra/commit/0dbf199110f22192ce5c95b1c8148d4872b4d119))
+
+  **Note:** If you previously relied on the default bundling behavior (all dependencies bundled), you can explicitly set `externals: false` in your bundler configuration.
+
+- Two smaller quality of life improvements: ([#11232](https://github.com/mastra-ai/mastra/pull/11232))
+  - The default `create-mastra` project no longer defines a LibSQLStore storage for the weather agent memory. It uses the root level `storage` option now (which is memory). This way no `mastra.db` files are created outside of the project
+  - When running `mastra init` inside a project that already has git initialized, the prompt to initialize git is skipped
+
+- Updated dependencies [[`ac3cc23`](https://github.com/mastra-ai/mastra/commit/ac3cc2397d1966bc0fc2736a223abc449d3c7719), [`a86f4df`](https://github.com/mastra-ai/mastra/commit/a86f4df0407311e0d2ea49b9a541f0938810d6a9), [`0dbf199`](https://github.com/mastra-ai/mastra/commit/0dbf199110f22192ce5c95b1c8148d4872b4d119)]:
+  - @mastra/core@1.0.0-beta.14
+  - @mastra/deployer@1.0.0-beta.14
+
 ## 1.0.0-beta.10
 
 ### Patch Changes

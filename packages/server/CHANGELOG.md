@@ -1,5 +1,14 @@
 # @mastra/server
 
+## 1.0.0-beta.14
+
+### Patch Changes
+
+- Add execution metadata to A2A message/send responses. The A2A protocol now returns detailed execution information including tool calls, tool results, token usage, and finish reason in the task metadata. This allows clients to inspect which tools were invoked during agent execution and access execution statistics without additional queries. ([#11241](https://github.com/mastra-ai/mastra/pull/11241))
+
+- Updated dependencies [[`ac3cc23`](https://github.com/mastra-ai/mastra/commit/ac3cc2397d1966bc0fc2736a223abc449d3c7719), [`a86f4df`](https://github.com/mastra-ai/mastra/commit/a86f4df0407311e0d2ea49b9a541f0938810d6a9), [`0dbf199`](https://github.com/mastra-ai/mastra/commit/0dbf199110f22192ce5c95b1c8148d4872b4d119)]:
+  - @mastra/core@1.0.0-beta.14
+
 ## 1.0.0-beta.13
 
 ### Patch Changes

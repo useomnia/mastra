@@ -1,5 +1,14 @@
 # @mastra/dane
 
+## 1.0.0-beta.14
+
+### Patch Changes
+
+- Updated dependencies [[`fb5a834`](https://github.com/mastra-ai/mastra/commit/fb5a834f8bd01e66384ac3e2a719641b14d40760), [`ac3cc23`](https://github.com/mastra-ai/mastra/commit/ac3cc2397d1966bc0fc2736a223abc449d3c7719), [`a86f4df`](https://github.com/mastra-ai/mastra/commit/a86f4df0407311e0d2ea49b9a541f0938810d6a9), [`0dbf199`](https://github.com/mastra-ai/mastra/commit/0dbf199110f22192ce5c95b1c8148d4872b4d119)]:
+  - @mastra/memory@1.0.0-beta.6
+  - @mastra/core@1.0.0-beta.14
+  - @mastra/rag@2.0.0-beta.4
+
 ## 1.0.0-beta.13
 
 ### Patch Changes

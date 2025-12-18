@@ -1,5 +1,22 @@
 # @mastra/agent-builder
 
+## 1.0.0-beta.6
+
+### Patch Changes
+
+- Add support for AI SDK v6 (LanguageModelV3) ([#11191](https://github.com/mastra-ai/mastra/pull/11191))
+
+  Agents can now use `LanguageModelV3` models from AI SDK v6 beta providers like `@ai-sdk/openai@^3.0.0-beta`.
+
+  **New features:**
+  - Usage normalization: V3's nested usage format is normalized to Mastra's flat format with `reasoningTokens`, `cachedInputTokens`, and raw data preserved in a `raw` field
+
+  **Backward compatible:** All existing V1 and V2 models continue to work unchanged.
+
+- Updated dependencies [[`fb5a834`](https://github.com/mastra-ai/mastra/commit/fb5a834f8bd01e66384ac3e2a719641b14d40760), [`ac3cc23`](https://github.com/mastra-ai/mastra/commit/ac3cc2397d1966bc0fc2736a223abc449d3c7719), [`a86f4df`](https://github.com/mastra-ai/mastra/commit/a86f4df0407311e0d2ea49b9a541f0938810d6a9), [`0dbf199`](https://github.com/mastra-ai/mastra/commit/0dbf199110f22192ce5c95b1c8148d4872b4d119)]:
+  - @mastra/memory@1.0.0-beta.6
+  - @mastra/core@1.0.0-beta.14
+
 ## 1.0.0-beta.5
 
 ### Patch Changes

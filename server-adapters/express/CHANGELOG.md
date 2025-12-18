@@ -1,5 +1,13 @@
 # @mastra/express
 
+## 0.0.2-beta.9
+
+### Patch Changes
+
+- Updated dependencies [[`ac3cc23`](https://github.com/mastra-ai/mastra/commit/ac3cc2397d1966bc0fc2736a223abc449d3c7719), [`a86f4df`](https://github.com/mastra-ai/mastra/commit/a86f4df0407311e0d2ea49b9a541f0938810d6a9), [`484b9fb`](https://github.com/mastra-ai/mastra/commit/484b9fb28fc2499020900080d75b26278300a124), [`0dbf199`](https://github.com/mastra-ai/mastra/commit/0dbf199110f22192ce5c95b1c8148d4872b4d119)]:
+  - @mastra/core@1.0.0-beta.14
+  - @mastra/server@1.0.0-beta.14
+
 ## 0.0.2-beta.8
 
 ### Patch Changes

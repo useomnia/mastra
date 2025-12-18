@@ -1,5 +1,16 @@
 # @mastra/memory
 
+## 1.0.0-beta.6
+
+### Patch Changes
+
+- Fixed ReDoS vulnerability in working memory tag parsing. ([#11248](https://github.com/mastra-ai/mastra/pull/11248))
+
+  Replaced regex-based parsing with indexOf-based string parsing to prevent denial of service attacks from malicious input. The vulnerable regex `/<working_memory>([^]*?)<\/working_memory>/g` had O(n²) complexity on pathological inputs - the new implementation maintains O(n) linear time.
+
+- Updated dependencies [[`ac3cc23`](https://github.com/mastra-ai/mastra/commit/ac3cc2397d1966bc0fc2736a223abc449d3c7719), [`a86f4df`](https://github.com/mastra-ai/mastra/commit/a86f4df0407311e0d2ea49b9a541f0938810d6a9), [`0dbf199`](https://github.com/mastra-ai/mastra/commit/0dbf199110f22192ce5c95b1c8148d4872b4d119)]:
+  - @mastra/core@1.0.0-beta.14
+
 ## 1.0.0-beta.5
 
 ### Patch Changes

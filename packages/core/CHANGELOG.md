@@ -1,5 +1,49 @@
 # @mastra/core
 
+## 1.0.0-beta.14
+
+### Minor Changes
+
+- Add support for AI SDK v6 (LanguageModelV3) ([#11191](https://github.com/mastra-ai/mastra/pull/11191))
+
+  Agents can now use `LanguageModelV3` models from AI SDK v6 beta providers like `@ai-sdk/openai@^3.0.0-beta`.
+
+  **New features:**
+  - Usage normalization: V3's nested usage format is normalized to Mastra's flat format with `reasoningTokens`, `cachedInputTokens`, and raw data preserved in a `raw` field
+
+  **Backward compatible:** All existing V1 and V2 models continue to work unchanged.
+
+### Patch Changes
+
+- Fixed AbortSignal not propagating from parent workflows to nested sub-workflows in the evented workflow engine. ([#11142](https://github.com/mastra-ai/mastra/pull/11142))
+
+  Previously, canceling a parent workflow did not stop nested sub-workflows, causing them to continue running and consuming resources after the parent was canceled.
+
+  Now, when you cancel a parent workflow, all nested sub-workflows are automatically canceled as well, ensuring clean termination of the entire workflow tree.
+
+  **Example:**
+
+  ```typescript
+  const parentWorkflow = createWorkflow({ id: 'parent-workflow' }).then(someStep).then(nestedChildWorkflow).commit();
+
+  const run = await parentWorkflow.createRun();
+  const resultPromise = run.start({ inputData: { value: 5 } });
+
+  // Cancel the parent workflow - nested workflows will also be canceled
+  await run.cancel();
+  // or use: run.abortController.abort();
+
+  const result = await resultPromise;
+  // result.status === 'canceled'
+  // All nested child workflows are also canceled
+  ```
+
+  Related to #11063
+
+- Set `externals: true` as the default for `mastra build` and cloud-deployer to reduce bundle issues with native dependencies. ([`0dbf199`](https://github.com/mastra-ai/mastra/commit/0dbf199110f22192ce5c95b1c8148d4872b4d119))
+
+  **Note:** If you previously relied on the default bundling behavior (all dependencies bundled), you can explicitly set `externals: false` in your bundler configuration.
+
 ## 1.0.0-beta.13
 
 ### Patch Changes
