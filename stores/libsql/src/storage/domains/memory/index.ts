@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { Client, InValue } from '@libsql/client';
 import type { MastraMessageContentV2 } from '@mastra/core/agent';
 import { MessageList } from '@mastra/core/agent';
@@ -14,8 +15,14 @@ import type {
   StorageCloneThreadOutput,
   ThreadCloneMetadata,
   ObservationalMemoryRecord,
+  BufferedObservationChunk,
   CreateObservationalMemoryInput,
   UpdateActiveObservationsInput,
+  UpdateBufferedObservationsInput,
+  SwapBufferedToActiveInput,
+  SwapBufferedToActiveResult,
+  UpdateBufferedReflectionInput,
+  SwapBufferedReflectionToActiveInput,
   CreateReflectionGenerationInput,
 } from '@mastra/core/storage';
 import {
@@ -76,7 +83,22 @@ export class MemoryLibSQL extends MemoryStorage {
       await this.#db.alterTable({
         tableName: OM_TABLE as any,
         schema: omSchema,
-        ifNotExists: ['observedMessageIds', 'observedTimezone'],
+        ifNotExists: [
+          'observedMessageIds',
+          'observedTimezone',
+          'bufferedObservations',
+          'bufferedObservationTokens',
+          'bufferedMessageIds',
+          'bufferedReflection',
+          'bufferedReflectionTokens',
+          'bufferedReflectionInputTokens',
+          'reflectedObservationLineCount',
+          'bufferedObservationChunks',
+          'isBufferingObservation',
+          'isBufferingReflection',
+          'lastBufferedAtTokens',
+          'lastBufferedAtTime',
+        ],
       });
     }
     // Add resourceId column for backwards compatibility
@@ -1261,7 +1283,7 @@ export class MemoryLibSQL extends MemoryStorage {
       const newThread: StorageThreadType = {
         id: newThreadId,
         resourceId: resourceId || sourceThread.resourceId,
-        title: title || (sourceThread.title ? `Clone of ${sourceThread.title}` : undefined),
+        title: title || (sourceThread.title ? `Clone of ${sourceThread.title}` : ''),
         metadata: {
           ...metadata,
           clone: cloneMetadata,
@@ -1281,7 +1303,7 @@ export class MemoryLibSQL extends MemoryStorage {
           args: [
             newThread.id,
             newThread.resourceId,
-            newThread.title || null,
+            newThread.title ?? '',
             JSON.stringify(newThread.metadata),
             nowStr,
             nowStr,
@@ -1374,13 +1396,40 @@ export class MemoryLibSQL extends MemoryStorage {
       originType: row.originType || 'initial',
       generationCount: Number(row.generationCount || 0),
       activeObservations: row.activeObservations || '',
+      // Handle new chunk-based structure
+      bufferedObservationChunks: row.bufferedObservationChunks
+        ? typeof row.bufferedObservationChunks === 'string'
+          ? JSON.parse(row.bufferedObservationChunks)
+          : row.bufferedObservationChunks
+        : undefined,
+      // Deprecated fields (for backward compatibility)
       bufferedObservations: row.activeObservationsPendingUpdate || undefined,
-
+      bufferedObservationTokens: row.bufferedObservationTokens ? Number(row.bufferedObservationTokens) : undefined,
+      bufferedMessageIds: undefined, // Use bufferedObservationChunks instead
+      bufferedReflection: row.bufferedReflection || undefined,
+      bufferedReflectionTokens: row.bufferedReflectionTokens ? Number(row.bufferedReflectionTokens) : undefined,
+      bufferedReflectionInputTokens: row.bufferedReflectionInputTokens
+        ? Number(row.bufferedReflectionInputTokens)
+        : undefined,
+      reflectedObservationLineCount: row.reflectedObservationLineCount
+        ? Number(row.reflectedObservationLineCount)
+        : undefined,
       totalTokensObserved: Number(row.totalTokensObserved || 0),
       observationTokenCount: Number(row.observationTokenCount || 0),
       pendingMessageTokens: Number(row.pendingMessageTokens || 0),
       isReflecting: Boolean(row.isReflecting),
       isObserving: Boolean(row.isObserving),
+      isBufferingObservation:
+        row.isBufferingObservation === true ||
+        row.isBufferingObservation === 'true' ||
+        row.isBufferingObservation === 1,
+      isBufferingReflection:
+        row.isBufferingReflection === true || row.isBufferingReflection === 'true' || row.isBufferingReflection === 1,
+      lastBufferedAtTokens:
+        typeof row.lastBufferedAtTokens === 'number'
+          ? row.lastBufferedAtTokens
+          : parseInt(String(row.lastBufferedAtTokens ?? '0'), 10) || 0,
+      lastBufferedAtTime: row.lastBufferedAtTime ? new Date(String(row.lastBufferedAtTime)) : null,
       config: row.config ? JSON.parse(row.config) : {},
       metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
       observedMessageIds: row.observedMessageIds ? JSON.parse(row.observedMessageIds) : undefined,
@@ -1460,6 +1509,10 @@ export class MemoryLibSQL extends MemoryStorage {
         pendingMessageTokens: 0,
         isReflecting: false,
         isObserving: false,
+        isBufferingObservation: false,
+        isBufferingReflection: false,
+        lastBufferedAtTokens: 0,
+        lastBufferedAtTime: null,
         config: input.config,
         observedTimezone: input.observedTimezone,
       };
@@ -1470,8 +1523,9 @@ export class MemoryLibSQL extends MemoryStorage {
           "activeObservations", "activeObservationsPendingUpdate",
           "originType", config, "generationCount", "lastObservedAt", "lastReflectionAt",
           "pendingMessageTokens", "totalTokensObserved", "observationTokenCount",
-          "isObserving", "isReflecting", "observedTimezone", "createdAt", "updatedAt"
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          "isObserving", "isReflecting", "isBufferingObservation", "isBufferingReflection", "lastBufferedAtTokens", "lastBufferedAtTime",
+          "observedTimezone", "createdAt", "updatedAt"
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [
           id,
           lookupKey,
@@ -1490,6 +1544,10 @@ export class MemoryLibSQL extends MemoryStorage {
           0,
           false,
           false,
+          false, // isBufferingObservation
+          false, // isBufferingReflection
+          0, // lastBufferedAtTokens
+          null, // lastBufferedAtTime
           input.observedTimezone || null,
           now.toISOString(),
           now.toISOString(),
@@ -1583,6 +1641,10 @@ export class MemoryLibSQL extends MemoryStorage {
         pendingMessageTokens: 0,
         isReflecting: false,
         isObserving: false,
+        isBufferingObservation: false,
+        isBufferingReflection: false,
+        lastBufferedAtTokens: 0,
+        lastBufferedAtTime: null,
         config: input.currentRecord.config,
         metadata: input.currentRecord.metadata,
         observedTimezone: input.currentRecord.observedTimezone,
@@ -1594,8 +1656,9 @@ export class MemoryLibSQL extends MemoryStorage {
           "activeObservations", "activeObservationsPendingUpdate",
           "originType", config, "generationCount", "lastObservedAt", "lastReflectionAt",
           "pendingMessageTokens", "totalTokensObserved", "observationTokenCount",
-          "isObserving", "isReflecting", "observedTimezone", "createdAt", "updatedAt"
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          "isObserving", "isReflecting", "isBufferingObservation", "isBufferingReflection", "lastBufferedAtTokens", "lastBufferedAtTime",
+          "observedTimezone", "createdAt", "updatedAt"
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [
           id,
           lookupKey,
@@ -1612,8 +1675,12 @@ export class MemoryLibSQL extends MemoryStorage {
           record.pendingMessageTokens,
           record.totalTokensObserved,
           record.observationTokenCount,
-          false,
-          false,
+          false, // isObserving
+          false, // isReflecting
+          false, // isBufferingObservation
+          false, // isBufferingReflection
+          0, // lastBufferedAtTokens
+          null, // lastBufferedAtTime
           record.observedTimezone || null,
           now.toISOString(),
           now.toISOString(),
@@ -1698,6 +1765,80 @@ export class MemoryLibSQL extends MemoryStorage {
     }
   }
 
+  async setBufferingObservationFlag(id: string, isBuffering: boolean, lastBufferedAtTokens?: number): Promise<void> {
+    try {
+      const nowStr = new Date().toISOString();
+
+      let sql: string;
+      let args: InValue[];
+
+      if (lastBufferedAtTokens !== undefined) {
+        sql = `UPDATE "${OM_TABLE}" SET "isBufferingObservation" = ?, "lastBufferedAtTokens" = ?, "updatedAt" = ? WHERE id = ?`;
+        args = [isBuffering, lastBufferedAtTokens, nowStr, id];
+      } else {
+        sql = `UPDATE "${OM_TABLE}" SET "isBufferingObservation" = ?, "updatedAt" = ? WHERE id = ?`;
+        args = [isBuffering, nowStr, id];
+      }
+
+      const result = await this.#client.execute({ sql, args });
+
+      if (result.rowsAffected === 0) {
+        throw new MastraError({
+          id: createStorageErrorId('LIBSQL', 'SET_BUFFERING_OBSERVATION_FLAG', 'NOT_FOUND'),
+          text: `Observational memory record not found: ${id}`,
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: { id, isBuffering, lastBufferedAtTokens: lastBufferedAtTokens ?? null },
+        });
+      }
+    } catch (error) {
+      if (error instanceof MastraError) {
+        throw error;
+      }
+      throw new MastraError(
+        {
+          id: createStorageErrorId('LIBSQL', 'SET_BUFFERING_OBSERVATION_FLAG', 'FAILED'),
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: { id, isBuffering, lastBufferedAtTokens: lastBufferedAtTokens ?? null },
+        },
+        error,
+      );
+    }
+  }
+
+  async setBufferingReflectionFlag(id: string, isBuffering: boolean): Promise<void> {
+    try {
+      const result = await this.#client.execute({
+        sql: `UPDATE "${OM_TABLE}" SET "isBufferingReflection" = ?, "updatedAt" = ? WHERE id = ?`,
+        args: [isBuffering, new Date().toISOString(), id],
+      });
+
+      if (result.rowsAffected === 0) {
+        throw new MastraError({
+          id: createStorageErrorId('LIBSQL', 'SET_BUFFERING_REFLECTION_FLAG', 'NOT_FOUND'),
+          text: `Observational memory record not found: ${id}`,
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: { id, isBuffering },
+        });
+      }
+    } catch (error) {
+      if (error instanceof MastraError) {
+        throw error;
+      }
+      throw new MastraError(
+        {
+          id: createStorageErrorId('LIBSQL', 'SET_BUFFERING_REFLECTION_FLAG', 'FAILED'),
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: { id, isBuffering },
+        },
+        error,
+      );
+    }
+  }
+
   async clearObservationalMemory(threadId: string | null, resourceId: string): Promise<void> {
     try {
       const lookupKey = this.getOMKey(threadId, resourceId);
@@ -1718,11 +1859,11 @@ export class MemoryLibSQL extends MemoryStorage {
     }
   }
 
-  async addPendingMessageTokens(id: string, tokenCount: number): Promise<void> {
+  async setPendingMessageTokens(id: string, tokenCount: number): Promise<void> {
     try {
       const result = await this.#client.execute({
         sql: `UPDATE "${OM_TABLE}" SET 
-          "pendingMessageTokens" = "pendingMessageTokens" + ?, 
+          "pendingMessageTokens" = ?, 
           "updatedAt" = ? 
         WHERE id = ?`,
         args: [tokenCount, new Date().toISOString(), id],
@@ -1730,7 +1871,7 @@ export class MemoryLibSQL extends MemoryStorage {
 
       if (result.rowsAffected === 0) {
         throw new MastraError({
-          id: createStorageErrorId('LIBSQL', 'ADD_PENDING_MESSAGE_TOKENS', 'NOT_FOUND'),
+          id: createStorageErrorId('LIBSQL', 'SET_PENDING_MESSAGE_TOKENS', 'NOT_FOUND'),
           text: `Observational memory record not found: ${id}`,
           domain: ErrorDomain.STORAGE,
           category: ErrorCategory.THIRD_PARTY,
@@ -1743,10 +1884,437 @@ export class MemoryLibSQL extends MemoryStorage {
       }
       throw new MastraError(
         {
-          id: createStorageErrorId('LIBSQL', 'ADD_PENDING_MESSAGE_TOKENS', 'FAILED'),
+          id: createStorageErrorId('LIBSQL', 'SET_PENDING_MESSAGE_TOKENS', 'FAILED'),
           domain: ErrorDomain.STORAGE,
           category: ErrorCategory.THIRD_PARTY,
           details: { id, tokenCount },
+        },
+        error,
+      );
+    }
+  }
+
+  // ============================================
+  // Async Buffering Methods
+  // ============================================
+
+  async updateBufferedObservations(input: UpdateBufferedObservationsInput): Promise<void> {
+    try {
+      const nowStr = new Date().toISOString();
+
+      // First get current record to get existing chunks
+      const current = await this.#client.execute({
+        sql: `SELECT "bufferedObservationChunks" FROM "${OM_TABLE}" WHERE id = ?`,
+        args: [input.id],
+      });
+
+      if (!current.rows || current.rows.length === 0) {
+        throw new MastraError({
+          id: createStorageErrorId('LIBSQL', 'UPDATE_BUFFERED_OBSERVATIONS', 'NOT_FOUND'),
+          text: `Observational memory record not found: ${input.id}`,
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: { id: input.id },
+        });
+      }
+
+      const row = current.rows[0]!;
+      let existingChunks: BufferedObservationChunk[] = [];
+      if (row.bufferedObservationChunks) {
+        try {
+          const parsed =
+            typeof row.bufferedObservationChunks === 'string'
+              ? JSON.parse(row.bufferedObservationChunks)
+              : row.bufferedObservationChunks;
+          existingChunks = Array.isArray(parsed) ? parsed : [];
+        } catch {
+          existingChunks = [];
+        }
+      }
+
+      // Create new chunk with ID and timestamp
+      const newChunk: BufferedObservationChunk = {
+        id: `ombuf-${randomUUID()}`,
+        cycleId: input.chunk.cycleId,
+        observations: input.chunk.observations,
+        tokenCount: input.chunk.tokenCount,
+        messageIds: input.chunk.messageIds,
+        messageTokens: input.chunk.messageTokens,
+        lastObservedAt: input.chunk.lastObservedAt,
+        createdAt: new Date(),
+        suggestedContinuation: input.chunk.suggestedContinuation,
+        currentTask: input.chunk.currentTask,
+      };
+
+      const newChunks = [...existingChunks, newChunk];
+
+      const lastBufferedAtTime = input.lastBufferedAtTime ? input.lastBufferedAtTime.toISOString() : null;
+      const result = await this.#client.execute({
+        sql: `UPDATE "${OM_TABLE}" SET
+          "bufferedObservationChunks" = ?,
+          "lastBufferedAtTime" = COALESCE(?, "lastBufferedAtTime"),
+          "updatedAt" = ?
+        WHERE id = ?`,
+        args: [JSON.stringify(newChunks), lastBufferedAtTime, nowStr, input.id],
+      });
+
+      if (result.rowsAffected === 0) {
+        throw new MastraError({
+          id: createStorageErrorId('LIBSQL', 'UPDATE_BUFFERED_OBSERVATIONS', 'NOT_FOUND'),
+          text: `Observational memory record not found: ${input.id}`,
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: { id: input.id },
+        });
+      }
+    } catch (error) {
+      if (error instanceof MastraError) {
+        throw error;
+      }
+      throw new MastraError(
+        {
+          id: createStorageErrorId('LIBSQL', 'UPDATE_BUFFERED_OBSERVATIONS', 'FAILED'),
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: { id: input.id },
+        },
+        error,
+      );
+    }
+  }
+
+  async swapBufferedToActive(input: SwapBufferedToActiveInput): Promise<SwapBufferedToActiveResult> {
+    try {
+      const nowStr = new Date().toISOString();
+
+      // Get current record
+      const current = await this.#client.execute({
+        sql: `SELECT * FROM "${OM_TABLE}" WHERE id = ?`,
+        args: [input.id],
+      });
+
+      if (!current.rows || current.rows.length === 0) {
+        throw new MastraError({
+          id: createStorageErrorId('LIBSQL', 'SWAP_BUFFERED_TO_ACTIVE', 'NOT_FOUND'),
+          text: `Observational memory record not found: ${input.id}`,
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: { id: input.id },
+        });
+      }
+
+      const row = current.rows[0]!;
+
+      // Parse buffered chunks
+      let chunks: BufferedObservationChunk[] = [];
+      if (row.bufferedObservationChunks) {
+        try {
+          const parsed =
+            typeof row.bufferedObservationChunks === 'string'
+              ? JSON.parse(row.bufferedObservationChunks)
+              : row.bufferedObservationChunks;
+          chunks = Array.isArray(parsed) ? parsed : [];
+        } catch {
+          chunks = [];
+        }
+      }
+
+      if (chunks.length === 0) {
+        return {
+          chunksActivated: 0,
+          messageTokensActivated: 0,
+          observationTokensActivated: 0,
+          messagesActivated: 0,
+          activatedCycleIds: [],
+          activatedMessageIds: [],
+        };
+      }
+
+      // Calculate target message tokens to activate based on new formula:
+      // retentionFloor = threshold * (1 - ratio) represents tokens to keep as raw messages
+      // targetMessageTokens = max(0, currentPending - retentionFloor) represents tokens to activate
+      const retentionFloor = input.messageTokensThreshold * (1 - input.activationRatio);
+      const targetMessageTokens = Math.max(0, input.currentPendingTokens - retentionFloor);
+
+      // Find the closest chunk boundary to the target, biased over (prefer removing
+      // slightly more than the target so remaining context lands at or below retentionFloor).
+      // Track both best-over and best-under boundaries so we can fall back to under
+      // if the over boundary would overshoot by too much.
+      let cumulativeMessageTokens = 0;
+      let bestOverBoundary = 0;
+      let bestOverTokens = 0;
+      let bestUnderBoundary = 0;
+      let bestUnderTokens = 0;
+
+      for (let i = 0; i < chunks.length; i++) {
+        cumulativeMessageTokens += chunks[i]!.messageTokens ?? 0;
+        const boundary = i + 1;
+
+        if (cumulativeMessageTokens >= targetMessageTokens) {
+          // Over or equal — track the closest (lowest) over boundary
+          if (bestOverBoundary === 0 || cumulativeMessageTokens < bestOverTokens) {
+            bestOverBoundary = boundary;
+            bestOverTokens = cumulativeMessageTokens;
+          }
+        } else {
+          // Under — track the closest (highest) under boundary
+          if (cumulativeMessageTokens > bestUnderTokens) {
+            bestUnderBoundary = boundary;
+            bestUnderTokens = cumulativeMessageTokens;
+          }
+        }
+      }
+
+      // Safeguard: if the over boundary would eat into more than 95% of the
+      // retention floor, fall back to the best under boundary instead.
+      // This prevents edge cases where a large chunk overshoots dramatically.
+      // When forceMaxActivation is set (above blockAfter), skip the safeguard
+      // and always prefer the over boundary to aggressively reduce context.
+      // Additionally, never bias over if it would leave fewer than 1000 tokens
+      // remaining — at that level the agent may lose all meaningful context.
+      const maxOvershoot = retentionFloor * 0.95;
+      const overshoot = bestOverTokens - targetMessageTokens;
+      const remainingAfterOver = input.currentPendingTokens - bestOverTokens;
+
+      let chunksToActivate: number;
+      if (input.forceMaxActivation && bestOverBoundary > 0) {
+        chunksToActivate = bestOverBoundary;
+      } else if (
+        bestOverBoundary > 0 &&
+        overshoot <= maxOvershoot &&
+        (remainingAfterOver >= 1000 || retentionFloor === 0)
+      ) {
+        chunksToActivate = bestOverBoundary;
+      } else if (bestUnderBoundary > 0) {
+        chunksToActivate = bestUnderBoundary;
+      } else if (bestOverBoundary > 0) {
+        // All boundaries are over and exceed the safeguard — still activate
+        // the closest over boundary (better than nothing)
+        chunksToActivate = bestOverBoundary;
+      } else {
+        chunksToActivate = 1;
+      }
+
+      // Split chunks
+      const activatedChunks = chunks.slice(0, chunksToActivate);
+      const remainingChunks = chunks.slice(chunksToActivate);
+
+      // Combine activated observations
+      const activatedContent = activatedChunks.map(c => c.observations).join('\n\n');
+      const activatedTokens = activatedChunks.reduce((sum, c) => sum + c.tokenCount, 0);
+      const activatedMessageTokens = activatedChunks.reduce((sum, c) => sum + (c.messageTokens ?? 0), 0);
+      const activatedMessageCount = activatedChunks.reduce((sum, c) => sum + c.messageIds.length, 0);
+      const activatedCycleIds = activatedChunks.map(c => c.cycleId).filter((id): id is string => !!id);
+      const activatedMessageIds = activatedChunks.flatMap(c => c.messageIds ?? []);
+
+      // Derive lastObservedAt from the latest activated chunk, or use provided value
+      const latestChunk = activatedChunks[activatedChunks.length - 1];
+      const lastObservedAt =
+        input.lastObservedAt ?? (latestChunk?.lastObservedAt ? new Date(latestChunk.lastObservedAt) : new Date());
+      const lastObservedAtStr = lastObservedAt.toISOString();
+
+      // Get existing values
+      const existingActive = (row.activeObservations as string) || '';
+      const existingTokenCount = Number(row.observationTokenCount || 0);
+
+      // Calculate new values
+      const newActive = existingActive ? `${existingActive}\n\n${activatedContent}` : activatedContent;
+      const newTokenCount = existingTokenCount + activatedTokens;
+      // NOTE: We intentionally do NOT add message IDs to observedMessageIds during buffered activation.
+      // Buffered chunks represent observations of messages as they were at buffering time.
+      // With streaming, messages grow after buffering, so we rely on lastObservedAt for filtering.
+      // New content after lastObservedAt will be picked up in subsequent observations.
+
+      // Decrement pending message tokens (clamped to zero)
+      const existingPending = Number(row.pendingMessageTokens || 0);
+      const newPending = Math.max(0, existingPending - activatedMessageTokens);
+
+      await this.#client.execute({
+        sql: `UPDATE "${OM_TABLE}" SET
+          "activeObservations" = ?,
+          "observationTokenCount" = ?,
+          "pendingMessageTokens" = ?,
+          "bufferedObservationChunks" = ?,
+          "lastObservedAt" = ?,
+          "updatedAt" = ?
+        WHERE id = ?`,
+        args: [
+          newActive,
+          newTokenCount,
+          newPending,
+          remainingChunks.length > 0 ? JSON.stringify(remainingChunks) : null,
+          lastObservedAtStr,
+          nowStr,
+          input.id,
+        ],
+      });
+
+      // Use hints from the most recent activated chunk only — stale hints from older chunks are discarded
+      const latestChunkHints = activatedChunks[activatedChunks.length - 1];
+
+      return {
+        chunksActivated: activatedChunks.length,
+        messageTokensActivated: activatedMessageTokens,
+        observationTokensActivated: activatedTokens,
+        messagesActivated: activatedMessageCount,
+        activatedCycleIds,
+        activatedMessageIds,
+        observations: activatedContent,
+        perChunk: activatedChunks.map(c => ({
+          cycleId: c.cycleId ?? '',
+          messageTokens: c.messageTokens ?? 0,
+          observationTokens: c.tokenCount,
+          messageCount: c.messageIds.length,
+          observations: c.observations,
+        })),
+        suggestedContinuation: latestChunkHints?.suggestedContinuation ?? undefined,
+        currentTask: latestChunkHints?.currentTask ?? undefined,
+      };
+    } catch (error) {
+      if (error instanceof MastraError) {
+        throw error;
+      }
+      throw new MastraError(
+        {
+          id: createStorageErrorId('LIBSQL', 'SWAP_BUFFERED_TO_ACTIVE', 'FAILED'),
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: { id: input.id },
+        },
+        error,
+      );
+    }
+  }
+
+  async updateBufferedReflection(input: UpdateBufferedReflectionInput): Promise<void> {
+    try {
+      const nowStr = new Date().toISOString();
+
+      const result = await this.#client.execute({
+        sql: `UPDATE "${OM_TABLE}" SET
+          "bufferedReflection" = CASE
+            WHEN "bufferedReflection" IS NOT NULL AND "bufferedReflection" != ''
+            THEN "bufferedReflection" || char(10) || char(10) || ?
+            ELSE ?
+          END,
+          "bufferedReflectionTokens" = COALESCE("bufferedReflectionTokens", 0) + ?,
+          "bufferedReflectionInputTokens" = COALESCE("bufferedReflectionInputTokens", 0) + ?,
+          "reflectedObservationLineCount" = ?,
+          "updatedAt" = ?
+        WHERE id = ?`,
+        args: [
+          input.reflection,
+          input.reflection,
+          input.tokenCount,
+          input.inputTokenCount,
+          input.reflectedObservationLineCount,
+          nowStr,
+          input.id,
+        ],
+      });
+
+      if (result.rowsAffected === 0) {
+        throw new MastraError({
+          id: createStorageErrorId('LIBSQL', 'UPDATE_BUFFERED_REFLECTION', 'NOT_FOUND'),
+          text: `Observational memory record not found: ${input.id}`,
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: { id: input.id },
+        });
+      }
+    } catch (error) {
+      if (error instanceof MastraError) {
+        throw error;
+      }
+      throw new MastraError(
+        {
+          id: createStorageErrorId('LIBSQL', 'UPDATE_BUFFERED_REFLECTION', 'FAILED'),
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: { id: input.id },
+        },
+        error,
+      );
+    }
+  }
+
+  async swapBufferedReflectionToActive(input: SwapBufferedReflectionToActiveInput): Promise<ObservationalMemoryRecord> {
+    try {
+      // Get current record
+      const current = await this.#client.execute({
+        sql: `SELECT * FROM "${OM_TABLE}" WHERE id = ?`,
+        args: [input.currentRecord.id],
+      });
+
+      if (!current.rows || current.rows.length === 0) {
+        throw new MastraError({
+          id: createStorageErrorId('LIBSQL', 'SWAP_BUFFERED_REFLECTION_TO_ACTIVE', 'NOT_FOUND'),
+          text: `Observational memory record not found: ${input.currentRecord.id}`,
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: { id: input.currentRecord.id },
+        });
+      }
+
+      const row = current.rows[0]!;
+      const bufferedReflection = (row.bufferedReflection as string) || '';
+      const reflectedLineCount = Number(row.reflectedObservationLineCount || 0);
+
+      if (!bufferedReflection) {
+        throw new MastraError({
+          id: createStorageErrorId('LIBSQL', 'SWAP_BUFFERED_REFLECTION_TO_ACTIVE', 'NO_CONTENT'),
+          text: 'No buffered reflection to swap',
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.USER,
+          details: { id: input.currentRecord.id },
+        });
+      }
+
+      // Split current activeObservations by the recorded boundary.
+      // Lines 0..reflectedLineCount were reflected on → replaced by bufferedReflection.
+      // Lines after reflectedLineCount were added after reflection started → kept as-is.
+      const currentObservations = (row.activeObservations as string) || '';
+      const allLines = currentObservations.split('\n');
+      const unreflectedLines = allLines.slice(reflectedLineCount);
+      const unreflectedContent = unreflectedLines.join('\n').trim();
+
+      // New activeObservations = bufferedReflection + unreflected observations
+      const newObservations = unreflectedContent
+        ? `${bufferedReflection}\n\n${unreflectedContent}`
+        : bufferedReflection;
+
+      // Create new generation with the merged content.
+      // tokenCount is computed by the processor using its token counter on the combined content.
+      const newRecord = await this.createReflectionGeneration({
+        currentRecord: input.currentRecord,
+        reflection: newObservations,
+        tokenCount: input.tokenCount,
+      });
+
+      // Clear buffered state on old record
+      const nowStr = new Date().toISOString();
+      await this.#client.execute({
+        sql: `UPDATE "${OM_TABLE}" SET
+          "bufferedReflection" = NULL,
+          "bufferedReflectionTokens" = NULL,
+          "bufferedReflectionInputTokens" = NULL,
+          "reflectedObservationLineCount" = NULL,
+          "updatedAt" = ?
+        WHERE id = ?`,
+        args: [nowStr, input.currentRecord.id],
+      });
+
+      return newRecord;
+    } catch (error) {
+      if (error instanceof MastraError) {
+        throw error;
+      }
+      throw new MastraError(
+        {
+          id: createStorageErrorId('LIBSQL', 'SWAP_BUFFERED_REFLECTION_TO_ACTIVE', 'FAILED'),
+          domain: ErrorDomain.STORAGE,
+          category: ErrorCategory.THIRD_PARTY,
+          details: { id: input.currentRecord.id },
         },
         error,
       );

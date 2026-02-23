@@ -159,6 +159,9 @@ export interface SerializedAgent {
   /** Serialized JSON schema for request context validation */
   requestContextSchema?: string;
   source?: 'code' | 'stored';
+  status?: 'draft' | 'published' | 'archived';
+  activeVersionId?: string;
+  hasDraft?: boolean;
 }
 
 export interface SerializedAgentWithId extends SerializedAgent {
@@ -286,8 +289,11 @@ export async function getSerializedSkillsFromAgent(
 
 /**
  * Get the list of available workspace tools for an agent.
- * Returns tool names based on workspace configuration (filesystem, sandbox, search)
- * and respects per-tool enabled settings.
+ *
+ * Tries to use core's `createWorkspaceTools` for an accurate tool list that
+ * respects runtime availability (e.g. `@ast-grep/napi` for ast_edit).
+ * Falls back to inlined config-based logic for older core versions that don't
+ * export `createWorkspaceTools`.
  */
 export async function getWorkspaceToolsFromAgent(agent: Agent, requestContext?: RequestContext): Promise<string[]> {
   try {
@@ -296,6 +302,18 @@ export async function getWorkspaceToolsFromAgent(agent: Agent, requestContext?: 
       return [];
     }
 
+    // Try core's createWorkspaceTools — it checks runtime dep availability
+    try {
+      const mod = await import('@mastra/core/workspace');
+      if (typeof mod.createWorkspaceTools === 'function') {
+        return Object.keys(mod.createWorkspaceTools(workspace));
+      }
+    } catch {
+      // Older core version without workspace module — fall through
+    }
+
+    // Fallback: inlined logic for older core versions.
+    // Does not include AST_EDIT — only available via createWorkspaceTools above.
     const tools: string[] = [];
     const isReadOnly = workspace.filesystem?.readOnly ?? false;
     const toolsConfig = workspace.getToolsConfig();
@@ -332,6 +350,11 @@ export async function getWorkspaceToolsFromAgent(agent: Agent, requestContext?: 
         if (isEnabled(WORKSPACE_TOOLS.FILESYSTEM.MKDIR)) {
           tools.push(WORKSPACE_TOOLS.FILESYSTEM.MKDIR);
         }
+      }
+
+      // Grep tool (filesystem-based, not BM25/vector)
+      if (isEnabled(WORKSPACE_TOOLS.FILESYSTEM.GREP)) {
+        tools.push(WORKSPACE_TOOLS.FILESYSTEM.GREP);
       }
     }
 
@@ -474,6 +497,16 @@ async function formatAgentList({
     },
   }));
 
+  // Serialize requestContextSchema if present
+  let serializedRequestContextSchema: string | undefined;
+  if (agent.requestContextSchema) {
+    try {
+      serializedRequestContextSchema = stringify(zodToJsonSchema(agent.requestContextSchema));
+    } catch (error) {
+      logger.error('Error serializing requestContextSchema for agent', { agentName: agent.name, error });
+    }
+  }
+
   return {
     id: agent.id || id,
     name: agent.name,
@@ -494,7 +527,19 @@ async function formatAgentList({
     modelList,
     defaultGenerateOptionsLegacy,
     defaultStreamOptionsLegacy,
+    requestContextSchema: serializedRequestContextSchema,
     source: (agent as any).source ?? 'code',
+    ...(agent.toRawConfig()?.status
+      ? { status: agent.toRawConfig()!.status as 'draft' | 'published' | 'archived' }
+      : {}),
+    ...(agent.toRawConfig()?.activeVersionId
+      ? { activeVersionId: agent.toRawConfig()!.activeVersionId as string }
+      : {}),
+    hasDraft: !!(
+      agent.toRawConfig()?.resolvedVersionId &&
+      agent.toRawConfig()?.activeVersionId &&
+      agent.toRawConfig()!.resolvedVersionId !== agent.toRawConfig()!.activeVersionId
+    ),
   };
 }
 
@@ -536,7 +581,7 @@ export async function getAgentFromSystem({ mastra, agentId }: { mastra: Context[
   if (!agent) {
     logger.debug(`Agent ${agentId} not found in code-defined agents, looking in stored agents`);
     try {
-      agent = (await mastra.getEditor()?.getStoredAgentById(agentId)) ?? null;
+      agent = (await mastra.getEditor()?.agent.getById(agentId)) ?? null;
     } catch (error) {
       logger.debug('Error getting stored agent', error);
     }
@@ -696,6 +741,9 @@ async function formatAgent({
     defaultStreamOptionsLegacy,
     requestContextSchema: serializedRequestContextSchema,
     source: (agent as any).source ?? 'code',
+    ...(agent.toRawConfig()?.status
+      ? { status: agent.toRawConfig()!.status as 'draft' | 'published' | 'archived' }
+      : {}),
   };
 }
 
@@ -742,7 +790,7 @@ export const LIST_AGENTS_ROUTE = createRoute({
 
         let storedAgentsResult;
         try {
-          storedAgentsResult = await editor?.listStoredAgents();
+          storedAgentsResult = await editor?.agent.list();
         } catch (error) {
           console.error('Error listing stored agents:', error);
           storedAgentsResult = null;
@@ -750,8 +798,11 @@ export const LIST_AGENTS_ROUTE = createRoute({
 
         if (storedAgentsResult?.agents) {
           // Process each agent individually to avoid one bad agent breaking the whole list
-          for (const agent of storedAgentsResult.agents) {
+          for (const storedAgentConfig of storedAgentsResult.agents) {
             try {
+              const agent = await editor?.agent.getById(storedAgentConfig.id, { status: 'draft' });
+              if (!agent) continue;
+
               const serialized = await formatAgentList({
                 id: agent.id,
                 mastra,
@@ -767,7 +818,7 @@ export const LIST_AGENTS_ROUTE = createRoute({
             } catch (agentError) {
               // Log but continue with other agents
               const logger = mastra.getLogger();
-              logger.warn('Failed to serialize stored agent', { agentId: agent.id, error: agentError });
+              logger.warn('Failed to serialize stored agent', { agentId: storedAgentConfig.id, error: agentError });
             }
           }
         }
@@ -832,11 +883,16 @@ export const CLONE_AGENT_ROUTE = createRoute({
   requiresAuth: true,
   handler: async ({ agentId, mastra, newId, newName, metadata, authorId, requestContext }) => {
     try {
+      const editor = mastra.getEditor();
+      if (!editor) {
+        return handleError(new Error('Editor is not configured on the Mastra instance'), 'Error cloning agent');
+      }
+
       const agent = await getAgentFromSystem({ mastra, agentId });
 
       const cloneId = toSlug(newId || `${agentId}-clone`);
 
-      const result = await agent.cloneAgent({
+      const result = await editor.agent.clone(agent, {
         newId: cloneId,
         newName,
         metadata,

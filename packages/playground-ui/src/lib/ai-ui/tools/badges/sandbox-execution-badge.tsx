@@ -1,7 +1,8 @@
 import { MastraUIMessage } from '@mastra/react';
 import { WORKSPACE_TOOLS } from '@/domains/workspace/constants';
 import { ToolApprovalButtons, ToolApprovalButtonsProps } from './tool-approval-buttons';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useAuiState } from '@assistant-ui/react';
 import { cn } from '@/lib/utils';
 import { CheckIcon, ChevronUpIcon, CopyIcon, TerminalSquare } from 'lucide-react';
 import { IconButton } from '@/ds/components/IconButton';
@@ -10,21 +11,24 @@ import { Icon } from '@/ds/icons';
 import { useLinkComponent } from '@/lib/framework';
 import { useCopyToClipboard } from '../../hooks/use-copy-to-clipboard';
 
-interface SandboxInfo {
+// Matches the shape returned by workspace.getInfo() — flat, not nested under "workspace"
+interface WorkspaceMetadata {
+  toolName?: string;
   id?: string;
   name?: string;
-  provider?: string;
   status?: string;
-}
-
-interface WorkspaceInfo {
-  id?: string;
-  name?: string;
-}
-
-interface ExecutionMetadata {
-  workspace?: WorkspaceInfo;
-  sandbox?: SandboxInfo;
+  sandbox?: {
+    id?: string;
+    name?: string;
+    provider?: string;
+    status?: string;
+  };
+  filesystem?: {
+    id?: string;
+    name?: string;
+    provider?: string;
+    status?: string;
+  };
 }
 
 // Get status dot color based on sandbox status
@@ -51,16 +55,6 @@ export interface SandboxExecutionBadgeProps extends Omit<ToolApprovalButtonsProp
   args: Record<string, unknown> | string;
   result: any;
   metadata?: MastraUIMessage['metadata'];
-  toolOutput?: Array<{
-    type: string;
-    data?: string;
-    timestamp?: number;
-    metadata?: ExecutionMetadata;
-    exitCode?: number;
-    success?: boolean;
-    executionTimeMs?: number;
-  }>;
-  suspendPayload?: any;
   toolCalled?: boolean;
 }
 
@@ -71,6 +65,7 @@ const useElapsedTime = (isRunning: boolean, startTime?: number) => {
 
   useEffect(() => {
     if (isRunning) {
+      setElapsed(0);
       startRef.current = startTime || Date.now();
       const interval = setInterval(() => {
         if (startRef.current) {
@@ -110,7 +105,7 @@ const TerminalBlock = ({ command, content, maxHeight = '20rem', onCopy, isCopied
       {command && (
         <div className="px-3 py-2 bg-surface3 border-b border-border1 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="text-icon6 text-xs shrink-0">$</span>
+            <span className="text-neutral6 text-xs shrink-0">$</span>
             <code className="text-xs text-neutral-300 font-mono truncate">{command}</code>
           </div>
           {onCopy && (
@@ -139,7 +134,7 @@ const TerminalBlock = ({ command, content, maxHeight = '20rem', onCopy, isCopied
         style={{ maxHeight }}
         className="overflow-x-auto overflow-y-auto p-3 text-sm text-neutral-300 font-mono whitespace-pre-wrap bg-black"
       >
-        {content || <span className="text-icon6 italic">No output</span>}
+        {content || <span className="text-neutral6 italic">No output</span>}
       </pre>
     </div>
   );
@@ -150,13 +145,18 @@ export const SandboxExecutionBadge = ({
   args,
   result,
   metadata,
-  toolOutput,
   toolCallId,
   toolApprovalMetadata,
-  suspendPayload,
   isNetwork,
   toolCalled: toolCalledProp,
 }: SandboxExecutionBadgeProps) => {
+  // Get sandbox streaming data parts from the message
+  const message = useAuiState(s => s.message);
+  const dataParts = useMemo(() => {
+    const content = message.content as ReadonlyArray<{ type: string; name?: string; data?: any }>;
+    return content.filter(part => part.type === 'data');
+  }, [message.content]);
+
   const [isCollapsed, setIsCollapsed] = useState(false);
   const { isCopied, copyToClipboard } = useCopyToClipboard();
   const { Link } = useLinkComponent();
@@ -174,53 +174,46 @@ export const SandboxExecutionBadge = ({
     commandDisplay = toolName;
   }
 
-  // Filter toolOutput for sandbox stdout/stderr chunks
-  const sandboxChunks =
-    toolOutput?.filter(chunk => chunk.type === 'sandbox-stdout' || chunk.type === 'sandbox-stderr') || [];
-
-  // Extract execution metadata from the most recent chunk (to handle state changes during execution)
-  const chunksWithMetadata = toolOutput?.filter(
+  // Sandbox stdout/stderr chunks scoped to this tool call
+  const sandboxChunks = dataParts.filter(
     chunk =>
-      (chunk.type === 'sandbox-stdout' || chunk.type === 'sandbox-stderr' || chunk.type === 'sandbox-exit') &&
-      chunk.metadata,
-  ) as Array<{ type: string; metadata?: ExecutionMetadata }> | undefined;
-  const execMeta = chunksWithMetadata?.length ? chunksWithMetadata[chunksWithMetadata.length - 1]?.metadata : undefined;
+      (chunk.name === 'sandbox-stdout' || chunk.name === 'sandbox-stderr') && chunk.data?.toolCallId === toolCallId,
+  );
 
-  // Check for sandbox-exit chunk which indicates streaming is complete
-  const exitChunk = toolOutput?.find(chunk => chunk.type === 'sandbox-exit') as
-    | { type: 'sandbox-exit'; exitCode: number; success: boolean; executionTimeMs: number }
+  // Workspace metadata emitted first — scoped to this tool call
+  const workspaceMetaPart = dataParts.find(
+    chunk => chunk.name === 'workspace-metadata' && chunk.data?.toolCallId === toolCallId,
+  );
+  const execMeta = workspaceMetaPart?.data as WorkspaceMetadata | undefined;
+
+  // Exit chunk scoped to this tool call
+  const exitChunk = dataParts.find(chunk => chunk.name === 'sandbox-exit' && chunk.data?.toolCallId === toolCallId) as
+    | { name: string; data: { exitCode: number; success: boolean; executionTimeMs: number } }
     | undefined;
 
-  // Check if result is the final execution result (object with exitCode) vs streaming array
-  const hasFinalResult = result && !Array.isArray(result) && typeof result.exitCode === 'number';
-  const finalResult = hasFinalResult ? result : null;
+  // Streaming is complete if we have exit chunk or a final result
+  const isStreamingComplete = !!exitChunk || typeof result === 'string';
 
-  // Streaming is complete if we have exit chunk or final result
-  const isStreamingComplete = !!exitChunk || hasFinalResult;
+  const hasStarted = !!workspaceMetaPart; // metadata is emitted at tool start
+  const isRunning = hasStarted && !isStreamingComplete;
+  const toolCalled = toolCalledProp ?? (isStreamingComplete || hasStarted);
 
-  const hasStreamingOutput = sandboxChunks.length > 0;
-  const isRunning = hasStreamingOutput && !isStreamingComplete;
-  const toolCalled = toolCalledProp ?? (isStreamingComplete || hasStreamingOutput);
+  // Get exit info from data chunks
+  const exitCode = exitChunk?.data?.exitCode;
+  const exitSuccess = exitChunk?.data?.success;
+  const executionTime = exitChunk?.data?.executionTimeMs;
 
   // Combine streaming output into a single string
-  const streamingContent = sandboxChunks.map(chunk => chunk.data || '').join('');
+  const streamingContent = sandboxChunks.map(chunk => chunk.data?.output || '').join('');
 
-  // Get output content for display
-  const outputContent = hasStreamingOutput
-    ? streamingContent
-    : finalResult
-      ? [finalResult.stdout, finalResult.stderr].filter(Boolean).join('\n')
-      : '';
-
-  // Get exit info
-  const exitCode = exitChunk?.exitCode ?? finalResult?.exitCode;
-  const exitSuccess = exitChunk?.success ?? finalResult?.success;
-  const executionTime = exitChunk?.executionTimeMs ?? finalResult?.executionTimeMs;
+  // While running, show live streaming output.
+  // Once the tool completes, show the final result — it's what the LLM saw.
+  const outputContent = typeof result === 'string' ? result : streamingContent;
 
   const displayName = toolName === WORKSPACE_TOOLS.SANDBOX.EXECUTE_COMMAND ? 'Execute Command' : toolName;
 
   // Get start time from first streaming chunk for live timer
-  const firstChunkTime = sandboxChunks[0]?.timestamp;
+  const firstChunkTime = sandboxChunks[0]?.data?.timestamp as number | undefined;
   const elapsedTime = useElapsedTime(isRunning, firstChunkTime);
 
   const onCopy = () => {
@@ -237,20 +230,14 @@ export const SandboxExecutionBadge = ({
             <ChevronUpIcon className={cn('transition-all', isCollapsed ? 'rotate-90' : 'rotate-180')} />
           </Icon>
           <Badge icon={<TerminalSquare className="text-accent6" size={16} />}>{displayName}</Badge>
-          {execMeta?.sandbox?.name && (
+          {execMeta?.sandbox && (
             <Link
-              href={`/workspace?${new URLSearchParams({
-                ...(execMeta.workspace?.id && { workspaceId: execMeta.workspace.id }),
-                ...(execMeta.sandbox.id && { sandboxId: execMeta.sandbox.id }),
-              }).toString()}`}
-              className="flex items-center gap-1.5 text-xs text-icon6 px-1.5 py-0.5 rounded bg-surface3 border border-border1 hover:bg-surface4 hover:border-border2 transition-colors"
+              href={execMeta.id ? `/workspaces/${execMeta.id}` : '/workspaces'}
+              className="flex items-center gap-1.5 text-xs text-neutral6 px-1.5 py-0.5 rounded bg-surface3 border border-border1 hover:bg-surface4 hover:border-border2 transition-colors"
               onClick={(e: React.MouseEvent) => e.stopPropagation()}
             >
               <span className={cn('w-1.5 h-1.5 rounded-full', getStatusColor(execMeta.sandbox.status))} />
-              <span>{execMeta.sandbox.name}</span>
-              {execMeta.sandbox.id && (
-                <span className="text-icon4 text-[10px]">({execMeta.sandbox.id.slice(0, 8)})</span>
-              )}
+              <span>{execMeta.sandbox.name || execMeta.sandbox.provider}</span>
             </Link>
           )}
         </button>
@@ -263,7 +250,7 @@ export const SandboxExecutionBadge = ({
                 <span className="w-1.5 h-1.5 bg-accent6 rounded-full animate-pulse" />
                 <span className="animate-pulse">running</span>
               </span>
-              <span className="text-icon6 text-xs tabular-nums">{elapsedTime}ms</span>
+              <span className="text-neutral6 text-xs tabular-nums">{elapsedTime}ms</span>
             </>
           ) : (
             <>
@@ -275,7 +262,7 @@ export const SandboxExecutionBadge = ({
                     exit {exitCode}
                   </span>
                 ))}
-              {executionTime !== undefined && <span className="text-icon6 text-xs">{executionTime}ms</span>}
+              {executionTime !== undefined && <span className="text-neutral6 text-xs">{executionTime}ms</span>}
             </>
           )}
         </div>

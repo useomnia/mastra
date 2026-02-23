@@ -17,6 +17,7 @@ import { PrepareStepProcessor } from '../../../processors/processors/prepare-ste
 import { ProcessorRunner } from '../../../processors/runner';
 import { execute } from '../../../stream/aisdk/v5/execute';
 import { DefaultStepResult } from '../../../stream/aisdk/v5/output-helpers';
+import { safeEnqueue } from '../../../stream/base';
 import { MastraModelOutput } from '../../../stream/base/output';
 import type {
   ChunkType,
@@ -25,11 +26,12 @@ import type {
   TextStartPayload,
 } from '../../../stream/types';
 import { ChunkFrom } from '../../../stream/types';
+import { findProviderToolByName, inferProviderExecuted } from '../../../tools/provider-tool-utils';
 import { createStep } from '../../../workflows';
+import type { Workspace } from '../../../workspace/workspace';
 import type { LoopConfig, OuterLLMRun } from '../../types';
 import { AgenticRunState } from '../run-state';
 import { llmIterationOutputSchema } from '../schema';
-import { isControllerOpen } from '../stream';
 
 type ProcessOutputStreamOptions<OUTPUT = undefined> = {
   tools?: ToolSet;
@@ -155,9 +157,7 @@ async function processOutputStream<OUTPUT = undefined>({
             providerOptions: chunk.payload.providerMetadata,
           });
         }
-        if (isControllerOpen(controller)) {
-          controller.enqueue(chunk);
-        }
+        safeEnqueue(controller, chunk);
         break;
       }
 
@@ -168,9 +168,7 @@ async function processOutputStream<OUTPUT = undefined>({
           textDeltas: textDeltasFromState,
           isStreaming: true,
         });
-        if (isControllerOpen(controller)) {
-          controller.enqueue(chunk);
-        }
+        safeEnqueue(controller, chunk);
         break;
       }
 
@@ -180,9 +178,7 @@ async function processOutputStream<OUTPUT = undefined>({
         runState.setState({
           providerOptions: undefined,
         });
-        if (isControllerOpen(controller)) {
-          controller.enqueue(chunk);
-        }
+        safeEnqueue(controller, chunk);
         break;
       }
 
@@ -203,9 +199,7 @@ async function processOutputStream<OUTPUT = undefined>({
           }
         }
 
-        if (isControllerOpen(controller)) {
-          controller.enqueue(chunk);
-        }
+        safeEnqueue(controller, chunk);
 
         break;
       }
@@ -227,9 +221,7 @@ async function processOutputStream<OUTPUT = undefined>({
             logger?.error('Error calling onInputDelta', error);
           }
         }
-        if (isControllerOpen(controller)) {
-          controller.enqueue(chunk);
-        }
+        safeEnqueue(controller, chunk);
         break;
       }
 
@@ -258,14 +250,10 @@ async function processOutputStream<OUTPUT = undefined>({
             createdAt: new Date(),
           };
           messageList.add(message, 'response');
-          if (isControllerOpen(controller)) {
-            controller.enqueue(chunk);
-          }
+          safeEnqueue(controller, chunk);
           break;
         }
-        if (isControllerOpen(controller)) {
-          controller.enqueue(chunk);
-        }
+        safeEnqueue(controller, chunk);
         break;
       }
 
@@ -277,9 +265,7 @@ async function processOutputStream<OUTPUT = undefined>({
           reasoningDeltas: reasoningDeltasFromState,
           providerOptions: chunk.payload.providerMetadata ?? runState.state.providerOptions,
         });
-        if (isControllerOpen(controller)) {
-          controller.enqueue(chunk);
-        }
+        safeEnqueue(controller, chunk);
         break;
       }
 
@@ -313,9 +299,7 @@ async function processOutputStream<OUTPUT = undefined>({
           providerOptions: undefined,
         });
 
-        if (isControllerOpen(controller)) {
-          controller.enqueue(chunk);
-        }
+        safeEnqueue(controller, chunk);
         break;
       }
 
@@ -338,7 +322,7 @@ async function processOutputStream<OUTPUT = undefined>({
             createdAt: new Date(),
           };
           messageList.add(message, 'response');
-          controller.enqueue(chunk);
+          safeEnqueue(controller, chunk);
         }
         break;
 
@@ -365,7 +349,7 @@ async function processOutputStream<OUTPUT = undefined>({
             createdAt: new Date(),
           };
           messageList.add(message, 'response');
-          controller.enqueue(chunk);
+          safeEnqueue(controller, chunk);
         }
         break;
 
@@ -404,14 +388,12 @@ async function processOutputStream<OUTPUT = undefined>({
         const error = getErrorFromUnknown(chunk.payload.error, {
           fallbackMessage: 'Unknown error in agent stream',
         });
-        controller.enqueue({ ...chunk, payload: { ...chunk.payload, error } });
+        safeEnqueue(controller, { ...chunk, payload: { ...chunk.payload, error } });
         await options?.onError?.({ error });
         break;
 
       default:
-        if (isControllerOpen(controller)) {
-          controller.enqueue(chunk);
-        }
+        safeEnqueue(controller, chunk);
     }
 
     if (
@@ -447,6 +429,7 @@ function executeStreamWithFallbackModels<T>(
     let finalResult: T | undefined;
 
     let done = false;
+    let lastError: unknown;
     for (const modelConfig of models) {
       index++;
       const maxRetries = modelConfig.maxRetries || 0;
@@ -470,6 +453,7 @@ function executeStreamWithFallbackModels<T>(
             throw err;
           }
 
+          lastError = err;
           attempt++;
 
           logger?.error(`Error executing model ${modelConfig.model.modelId}, attempt ${attempt}====`, err);
@@ -487,8 +471,10 @@ function executeStreamWithFallbackModels<T>(
       }
     }
     if (typeof finalResult === 'undefined') {
-      logger?.error('Exhausted all fallback models and reached the maximum number of retries.');
-      throw new Error('Exhausted all fallback models and reached the maximum number of retries.');
+      const lastErrMsg = lastError instanceof Error ? lastError.message : String(lastError);
+      const errorMessage = `Exhausted all fallback models and reached the maximum number of retries. Last error: ${lastErrMsg}`;
+      logger?.error(errorMessage);
+      throw new Error(errorMessage, { cause: lastError });
     }
     return finalResult;
   };
@@ -522,6 +508,7 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
   modelSpanTracker,
   autoResumeSuspendedTools,
   maxProcessorRetries,
+  workspace,
   outputWriter,
 }: OuterLLMRun<TOOLS, OUTPUT>) {
   const initialSystemMessages = messageList.getAllSystemMessages();
@@ -539,11 +526,12 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
       let request: any;
       let rawResponse: any;
 
-      const { outputStream, callBail, runState, stepTools } = await executeStreamWithFallbackModels<{
+      const { outputStream, callBail, runState, stepTools, stepWorkspace } = await executeStreamWithFallbackModels<{
         outputStream: MastraModelOutput<OUTPUT>;
         runState: AgenticRunState;
         callBail?: boolean;
         stepTools?: TOOLS;
+        stepWorkspace?: Workspace;
       }>(
         models,
         logger,
@@ -571,6 +559,7 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
           providerOptions?: SharedProviderOptions | undefined;
           modelSettings?: Omit<CallSettings, 'abortSignal'> | undefined;
           structuredOutput?: StructuredOutputOptions<OUTPUT>;
+          workspace?: Workspace;
         } = {
           model,
           tools,
@@ -579,6 +568,7 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
           providerOptions,
           modelSettings,
           structuredOutput,
+          workspace,
         };
 
         const inputStepProcessors = [
@@ -625,19 +615,17 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
             // Handle TripWire from processInputStep - emit tripwire chunk and signal abort
             if (error instanceof TripWire) {
               // Emit tripwire chunk to the stream
-              if (isControllerOpen(controller)) {
-                controller.enqueue({
-                  type: 'tripwire',
-                  runId,
-                  from: ChunkFrom.AGENT,
-                  payload: {
-                    reason: error.message,
-                    retry: error.options?.retry,
-                    metadata: error.options?.metadata,
-                    processorId: error.processorId,
-                  },
-                });
-              }
+              safeEnqueue(controller, {
+                type: 'tripwire',
+                runId,
+                from: ChunkFrom.AGENT,
+                payload: {
+                  reason: error.message,
+                  retry: error.options?.retry,
+                  metadata: error.options?.metadata,
+                  processorId: error.processorId,
+                },
+              });
 
               // Create a minimal runState for the bail response
               const runState = new AgenticRunState({
@@ -791,13 +779,7 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
                   request = requestFromStream || {};
                   rawResponse = rawResponseFromStream;
 
-                  if (!isControllerOpen(controller)) {
-                    // Controller is closed or errored, skip enqueueing
-                    // This can happen when downstream errors (like in onStepFinish) close the controller
-                    return;
-                  }
-
-                  controller.enqueue({
+                  safeEnqueue(controller, {
                     runId,
                     from: ChunkFrom.AGENT,
                     type: 'step-start',
@@ -884,22 +866,18 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
               steps: inputData?.output?.steps ?? [],
             });
 
-            if (isControllerOpen(controller)) {
-              controller.enqueue({ type: 'abort', runId, from: ChunkFrom.AGENT, payload: {} });
-            }
+            safeEnqueue(controller, { type: 'abort', runId, from: ChunkFrom.AGENT, payload: {} });
 
             return { callBail: true, outputStream, runState, stepTools: currentStep.tools };
           }
 
           if (isLastModel) {
-            if (isControllerOpen(controller)) {
-              controller.enqueue({
-                type: 'error',
-                runId,
-                from: ChunkFrom.AGENT,
-                payload: { error },
-              });
-            }
+            safeEnqueue(controller, {
+              type: 'error',
+              runId,
+              from: ChunkFrom.AGENT,
+              payload: { error },
+            });
 
             runState.setState({
               hasErrored: true,
@@ -913,13 +891,20 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
           }
         }
 
-        return { outputStream, callBail: false, runState, stepTools: currentStep.tools };
+        return {
+          outputStream,
+          callBail: false,
+          runState,
+          stepTools: currentStep.tools,
+          stepWorkspace: currentStep.workspace,
+        };
       });
 
-      // Store modified tools in _internal so toolCallStep can access them
+      // Store modified tools and workspace in _internal so toolCallStep can access them
       // without going through workflow serialization (which would lose execute functions)
       if (_internal) {
         _internal.stepTools = stepTools;
+        _internal.stepWorkspace = stepWorkspace ?? _internal.stepWorkspace;
       }
 
       if (callBail) {
@@ -973,6 +958,36 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
         return chunk.payload;
       });
 
+      /**
+       * Merge provider-executed tool results into their corresponding tool calls.
+       *
+       * For some provider-executed tools (like the ones from @ai-sdk/gateway),
+       * the response includes both tool-call and tool-result chunks.
+       * We need to:
+       * 1. Infer providerExecuted for provider tools when the stream doesn't set it
+       *    (gateway tools may not have providerExecuted set in the raw stream)
+       * 2. Pair tool results with their tool calls so the tool-call-step can skip
+       *    execution and return the actual provider result
+       */
+      const streamToolResults = outputStream._getImmediateToolResults();
+
+      if (toolCalls.length > 0) {
+        for (const toolCall of toolCalls) {
+          const tool = findProviderToolByName(stepTools, toolCall.toolName);
+          const inferred = inferProviderExecuted(toolCall.providerExecuted, tool);
+          if (inferred !== undefined) {
+            toolCall.providerExecuted = inferred;
+          }
+
+          if (toolCall.providerExecuted) {
+            const match = streamToolResults?.find(r => r.payload.toolCallId === toolCall.toolCallId);
+            if (match) {
+              toolCall.output = match.payload.result;
+            }
+          }
+        }
+      }
+
       if (toolCalls.length > 0) {
         const message: MastraDBMessage = {
           id: messageId,
@@ -988,7 +1003,8 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
                   toolName: toolCall.toolName,
                   args: toolCall.args,
                 },
-                ...(toolCall.providerMetadata ? { providerMetadata: toolCall.providerMetadata } : {}),
+                providerMetadata: toolCall.providerMetadata,
+                providerExecuted: toolCall.providerExecuted,
               };
             }),
           },
@@ -1123,6 +1139,13 @@ export function createLLMExecutionStep<TOOLS extends ToolSet = ToolSet, OUTPUT =
           tripwire: stepTripwireData,
         }),
       );
+
+      // Remove rejected response messages from the messageList before the next iteration.
+      // Without this, the LLM sees the rejected assistant response in its prompt on retry,
+      // which confuses models and often causes empty text responses.
+      if (shouldRetry) {
+        messageList.removeByIds([messageId]);
+      }
 
       // Build retry feedback text if retrying
       // This will be passed through workflow state to survive the system message reset

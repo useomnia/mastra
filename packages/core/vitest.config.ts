@@ -1,16 +1,26 @@
+import path from 'node:path';
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      '@internal/workflow-test-utils': path.resolve(__dirname, '../../workflows/_test-utils/src'),
+    },
+  },
   test: {
     projects: [
       {
+        resolve: {
+          alias: {
+            '@internal/workflow-test-utils': path.resolve(__dirname, '../../workflows/_test-utils/src'),
+          },
+        },
         test: {
           name: 'unit:packages/core',
           environment: 'node',
           include: ['src/**/*.test.ts'],
           exclude: ['src/**/*.e2e.test.ts'],
           testTimeout: 120000,
-          isolate: false,
         },
       },
       {
@@ -25,6 +35,7 @@ export default defineConfig({
         test: {
           name: 'typecheck:packages/core',
           environment: 'node',
+          include: [],
           typecheck: {
             enabled: true,
             include: ['src/**/*.test-d.ts'],
